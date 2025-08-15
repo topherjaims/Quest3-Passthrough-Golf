@@ -1,0 +1,141 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Quest 3 Passthrough Golf – Prototype</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+  <style>
+    #hud { position: fixed; left: 12px; top: 12px; font: 16px/1.3 system-ui; }
+    #hud :is(button,span){ padding:6px 10px; border-radius:8px; background:#0008; color:#fff; }
+  </style>
+</head>
+<body>
+<div id="hud"><span>Hold trigger & swing. Release to hit.</span></div>
+
+<a-scene
+  xr-mode-ui
+  webxr="optionalFeatures: local-floor, bounded-floor"
+  renderer="colorManagement: true"
+  background="transparent: true"
+  embedded
+>
+  <a-entity light="type: hemisphere; intensity: 1"></a-entity>
+
+  <a-entity id="screen"
+            position="0 1.5 -3"
+            geometry="primitive: plane; width: 4; height: 2.25"
+            material="shader: flat; src: #uicanvas; transparent: true">
+  </a-entity>
+
+  <canvas id="uicanvas" width="1024" height="576" crossorigin="anonymous"></canvas>
+
+  <a-entity laser-controls="hand: right"></a-entity>
+
+  <script>
+  const cvs = document.getElementById('uicanvas');
+  const ctx = cvs.getContext('2d');
+  function drawBackground(){
+    ctx.fillStyle = '#0b2a'; ctx.fillRect(0,0,cvs.width,cvs.height);
+    ctx.strokeStyle = '#1d5'; ctx.lineWidth = 2;
+    for (let y = 520; y > 80; y -= 40) {
+      ctx.beginPath(); ctx.moveTo(60, y); ctx.lineTo(cvs.width-60, y); ctx.stroke();
+    }
+    ctx.strokeStyle = '#6fa'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cvs.width/2, 560); ctx.lineTo(cvs.width/2, 100); ctx.stroke();
+  }
+  function drawBall(x, y){
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.fill();
+  }
+
+  let ball = { x: 100, y: 540, vx: 0, vy: 0, flying: false };
+  const pxPerMeterX = 220;
+  const pxPerMeterY = 220;
+  const g = 9.81;
+  const dt = 1/60;
+
+  function resetBall(){
+    ball = { x: 100, y: 540, vx: 0, vy: 0, flying: false };
+  }
+  function launchBall(speed_mps, loft_deg = 12, side_deg = 0){
+    const loft = loft_deg * Math.PI/180;
+    const side = side_deg * Math.PI/180;
+    const vHoriz = speed_mps * Math.cos(loft);
+    ball.vx = (vHoriz * Math.cos(side)) * (pxPerMeterX * dt);
+    ball.vy = - (speed_mps * Math.sin(loft)) * (pxPerMeterY * dt);
+    ball.flying = true;
+  }
+  function stepBall(){
+    if (!ball.flying) return;
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+    ball.vy += (g * pxPerMeterY * dt * dt);
+    if (ball.y > 540) { ball.y = 540; ball.flying = false; }
+  }
+
+  let last = { t: 0, pos: null };
+  let held = false, peakMps = 0, lastYaw = 0;
+  const sceneEl = document.querySelector('a-scene');
+
+  function getRightController(){
+    const s = sceneEl.renderer.xr.getSession();
+    if (!s) return null;
+    return [...s.inputSources].find(src => src && src.handedness === 'right' && src.gripSpace);
+  }
+
+  function pollSwing(frame){
+    const xr = sceneEl.renderer.xr;
+    const session = xr.getSession(); if (!session) return;
+    const refSpace = xr.getReferenceSpace();
+
+    const src = getRightController(); if (!src) return;
+    const pose = frame.getPose(src.gripSpace, refSpace); if (!pose) return;
+
+    const t = frame.predictedDisplayTime;
+    if (last.pos) {
+      const dtSec = Math.max(1/120, t - last.t);
+      const dx = pose.transform.position.x - last.pos.x;
+      const dy = pose.transform.position.y - last.pos.y;
+      const dz = pose.transform.position.z - last.pos.z;
+      const mps = Math.sqrt(dx*dx + dy*dy + dz*dz) / dtSec;
+      if (held) peakMps = Math.max(peakMps, mps);
+      const q = pose.transform.orientation;
+      const yaw = Math.atan2(2*(q.w*q.y + q.x*q.z), 1 - 2*(q.y*q.y + q.z*q.z)) * 180/Math.PI;
+      lastYaw = yaw;
+    }
+    last = { t, pos: pose.transform.position };
+  }
+
+  function handleButtons(){
+    const src = getRightController(); if (!src || !src.gamepad) return;
+    const trigger = src.gamepad.buttons[0];
+    if (trigger?.pressed && !held) { held = true; peakMps = 0; }
+    if (!trigger?.pressed && held) {
+      held = false;
+      const ballSpeed = Math.min(90, peakMps * 6 + 10);
+      const side = Math.max(-15, Math.min(15, lastYaw * 0.2));
+      resetBall();
+      launchBall(ballSpeed, 12, side);
+    }
+  }
+
+  sceneEl.renderer.setAnimationLoop((t, frame) => {
+    drawBackground();
+    stepBall();
+    drawBall(ball.x, ball.y);
+    const mesh = sceneEl.querySelector('#screen').getObject3D('mesh');
+    if (mesh && mesh.material && mesh.material.map) mesh.material.map.needsUpdate = true;
+    if (frame) { pollSwing(frame); handleButtons(); }
+  });
+
+  sceneEl.addEventListener('loaded', () => {
+    const tex = new THREE.CanvasTexture(cvs);
+    const mesh = sceneEl.querySelector('#screen').getObject3D('mesh');
+    if (mesh) { mesh.material.map = tex; mesh.material.needsUpdate = true; }
+  });
+  </script>
+</a-scene>
+</body>
+</html>
