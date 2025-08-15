@@ -2,107 +2,98 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Quest 3 Passthrough Golf – AR</title>
+  <title>Quest 3 Passthrough Golf – AR/VR</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
   <style>
-    body { margin:0; background: #000; }
-    #hud { position: fixed; left: 12px; top: 12px; font: 16px/1.3 system-ui; z-index: 10; }
-    #hud span, #enterAR, #enterVR {
-      padding: 6px 10px; border-radius: 8px; background: #0008; color: #fff; border: 0; margin-right: 8px;
-    }
-    #enterAR, #enterVR { cursor: pointer; }
+    :root { --hud-bg: #000c; --hud-fg: #fff; }
+    body { margin:0 }
+    #hud { position:fixed; left:12px; top:12px; z-index:10; font:16px system-ui; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    #hud .pill { background:var(--hud-bg); color:var(--hud-fg); border:0; padding:8px 12px; border-radius:10px }
+    #hud .btn { cursor:pointer }
+    #status { min-width: 200px }
   </style>
 </head>
 <body>
-  <div id="hud">
-    <span>Hold trigger & swing. Release to hit.</span>
-    <button id="enterAR" style="display:none">Enter AR</button>
-    <button id="enterVR" style="display:none">Enter VR</button>
-  </div>
+<div id="hud">
+  <span class="pill">Hold trigger & swing. Release to hit.</span>
+  <button id="enterAR" class="pill btn" style="display:none">Enter AR</button>
+  <button id="enterVR" class="pill btn" style="display:none">Enter VR</button>
+  <button id="reset" class="pill btn">Reset ball</button>
+  <label class="pill"><input id="lefty" type="checkbox"> Left-handed</label>
+  <span id="status" class="pill">checking XR…</span>
+</div>
 
-  <a-scene
-    renderer="alpha: true; colorManagement: true"
-    background="color: #000000; transparent: true"
-    webxr="optionalFeatures: local-floor, bounded-floor"
-    embedded
-  >
-    <a-entity light="type: hemisphere; intensity: 1"></a-entity>
+<a-scene renderer="alpha:true; colorManagement:true" background="transparent:true"
+         webxr="optionalFeatures: local-floor, bounded-floor" embedded>
+  <a-entity light="type: hemisphere; intensity: 1"></a-entity>
 
-    <!-- Big “simulator screen” -->
-    <a-entity id="screen"
-              position="0 1.5 -3"
-              geometry="primitive: plane; width: 4; height: 2.25"
-              material="shader: flat; src: #uicanvas; transparent: true">
-    </a-entity>
+  <!-- Bigger simulator screen: 5m wide at 3.5m distance -->
+  <a-entity id="screen" position="0 1.6 -3.5"
+            geometry="primitive: plane; width: 5; height: 2.8125"
+            material="shader: flat; src: #uicanvas; transparent: true">
+  </a-entity>
 
-    <!-- Canvas we draw the range + ball onto -->
-    <canvas id="uicanvas" width="1024" height="576" crossorigin="anonymous"></canvas>
+  <!-- Canvas we draw the range + ball onto -->
+  <canvas id="uicanvas" width="1280" height="720"></canvas>
 
-    <!-- Right-hand pointer (debug) -->
-    <a-entity laser-controls="hand: right"></a-entity>
+  <!-- Controller rays (debug) -->
+  <a-entity id="rayR" laser-controls="hand: right"></a-entity>
+  <a-entity id="rayL" laser-controls="hand: left"></a-entity>
 
-    <script>
-    // ====== Range drawing & ball physics (unchanged) ======
-    const cvs = document.getElementById('uicanvas');
-    const ctx = cvs.getContext('2d');
-    function drawBackground(){
+  <script>
+    // ====== Range drawing & ball physics ======
+    const cvs = document.getElementById('uicanvas'), ctx = cvs.getContext('2d');
+    function drawBG(){
       ctx.fillStyle = '#0b2a'; ctx.fillRect(0,0,cvs.width,cvs.height);
-      ctx.strokeStyle = '#1d5'; ctx.lineWidth = 2;
-      for (let y = 520; y > 80; y -= 40) {
-        ctx.beginPath(); ctx.moveTo(60, y); ctx.lineTo(cvs.width-60, y); ctx.stroke();
-      }
-      ctx.strokeStyle = '#6fa'; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.moveTo(cvs.width/2, 560); ctx.lineTo(cvs.width/2, 100); ctx.stroke();
+      ctx.strokeStyle='#1d5'; ctx.lineWidth=2;
+      for (let y = 640; y > 120; y -= 44) { ctx.beginPath(); ctx.moveTo(80,y); ctx.lineTo(cvs.width-80,y); ctx.stroke(); }
+      // yard markers
+      ctx.fillStyle = '#9f9'; ctx.font = '20px system-ui';
+      for (let i=50;i<=300;i+=50){ const y = 640 - i * 1.6; if (y>120) ctx.fillText(i+'y', 20, y); }
+      // center line
+      ctx.strokeStyle='#6fa'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(cvs.width/2, 700); ctx.lineTo(cvs.width/2, 120); ctx.stroke();
     }
-    function drawBall(x, y){
-      ctx.fillStyle = '#fff';
-      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.fill();
-    }
+    function drawBall(x,y){ ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x,y,7,0,Math.PI*2); ctx.fill(); }
 
-    let ball = { x: 100, y: 540, vx: 0, vy: 0, flying: false };
-    const pxPerMeterX = 220, pxPerMeterY = 220, g = 9.81, dt = 1/60;
-
-    function resetBall(){ ball = { x: 100, y: 540, vx: 0, vy: 0, flying: false }; }
-    function launchBall(speed_mps, loft_deg = 12, side_deg = 0){
-      const loft = loft_deg * Math.PI/180, side = side_deg * Math.PI/180;
-      const vHoriz = speed_mps * Math.cos(loft);
-      ball.vx = (vHoriz * Math.cos(side)) * (pxPerMeterX * dt);
-      ball.vy = - (speed_mps * Math.sin(loft)) * (pxPerMeterY * dt);
+    let ball = { x: 120, y: 680, vx: 0, vy: 0, flying: false };
+    const sx=240, sy=240, g=9.81, dt=1/60;
+    function resetBall(){ ball = { x: 120, y: 680, vx: 0, vy: 0, flying: false }; }
+    function launch(v, loft=12, side=0){
+      const L = loft*Math.PI/180, S = side*Math.PI/180; const vh=v*Math.cos(L);
+      ball.vx = (vh*Math.cos(S)) * (sx*dt);
+      ball.vy = -(v*Math.sin(L)) * (sy*dt);
       ball.flying = true;
     }
-    function stepBall(){
-      if (!ball.flying) return;
-      ball.x += ball.vx; ball.y += ball.vy;
-      ball.vy += (g * pxPerMeterY * dt * dt);
-      if (ball.y > 540) { ball.y = 540; ball.flying = false; }
-    }
+    function step(){ if(!ball.flying) return; ball.x+=ball.vx; ball.y+=ball.vy; ball.vy += (g*sy*dt*dt); if(ball.y>680){ ball.y=680; ball.flying=false; } }
 
-    // ====== Controller swing capture (unchanged) ======
-    let last = { t: 0, pos: null };
-    let held = false, peakMps = 0, lastYaw = 0;
-    const sceneEl = document.querySelector('a-scene');
+    // ====== Controller swing capture ======
+    let last = { t: 0, pos: null }, held=false, peak=0, lastYaw=0, lefty=false;
+    const scene = document.querySelector('a-scene');
+    const leftyBox = document.getElementById('lefty');
+    leftyBox.addEventListener('change', ()=> lefty = leftyBox.checked);
 
-    function getRightController(){
-      const s = sceneEl.renderer.xr.getSession();
-      if (!s) return null;
-      return [...s.inputSources].find(src => src && src.handedness === 'right' && src.gripSpace);
+    function getController(hand){ const s=scene.renderer.xr.getSession(); if(!s) return null;
+      return [...s.inputSources].find(src => src && src.handedness===hand && src.gripSpace); }
+
+    function activeSource(){
+      const src = lefty ? getController('left') : getController('right');
+      return src || getController('right') || getController('left');
     }
 
     function pollSwing(frame){
-      const session = sceneEl.renderer.xr.getSession(); if (!session) return;
-      const refSpace = sceneEl.renderer.xr.getReferenceSpace();
-      const src = getRightController(); if (!src) return;
-      const pose = frame.getPose(src.gripSpace, refSpace); if (!pose) return;
+      const s = scene.renderer.xr.getSession(); if(!s) return;
+      const ref = scene.renderer.xr.getReferenceSpace(); const src = activeSource(); if(!src) return;
+      const pose = frame.getPose(src.gripSpace, ref); if(!pose) return;
 
       const t = frame.predictedDisplayTime;
-      if (last.pos) {
-        const dtSec = Math.max(1/120, t - last.t);
+      if (last.pos){
+        const d = Math.max(1/120, t - last.t);
         const dx = pose.transform.position.x - last.pos.x;
         const dy = pose.transform.position.y - last.pos.y;
         const dz = pose.transform.position.z - last.pos.z;
-        const mps = Math.sqrt(dx*dx + dy*dy + dz*dz) / dtSec;
-        if (held) peakMps = Math.max(peakMps, mps);
+        const mps = Math.hypot(dx,dy,dz) / d;
+        if (held) peak = Math.max(peak, mps);
         const q = pose.transform.orientation;
         const yaw = Math.atan2(2*(q.w*q.y + q.x*q.z), 1 - 2*(q.y*q.y + q.z*q.z)) * 180/Math.PI;
         lastYaw = yaw;
@@ -110,71 +101,68 @@
       last = { t, pos: pose.transform.position };
     }
 
-    function handleButtons(){
-      const src = getRightController(); if (!src || !src.gamepad) return;
-      const trigger = src.gamepad.buttons[0];
-      if (trigger?.pressed && !held) { held = true; peakMps = 0; }
-      if (!trigger?.pressed && held) {
-        held = false;
-        const ballSpeed = Math.min(90, peakMps * 6 + 10);
-        const side = Math.max(-15, Math.min(15, lastYaw * 0.2));
-        resetBall(); launchBall(ballSpeed, 12, side);
+    function buttons(){
+      const src = activeSource(); if(!src || !src.gamepad) return;
+      const trig = src.gamepad.buttons[0];
+      if (trig?.pressed && !held){ held=true; peak=0; }
+      if (!trig?.pressed && held){
+        held=false;
+        const v = Math.min(90, peak*6 + 10);
+        const side = Math.max(-15, Math.min(15, lastYaw*0.2));
+        resetBall(); launch(v,12,side);
       }
     }
 
-    // ====== Render/update loop ======
-    sceneEl.renderer.setAnimationLoop((t, frame) => {
-      drawBackground(); stepBall(); drawBall(ball.x, ball.y);
-      const mesh = sceneEl.querySelector('#screen').getObject3D('mesh');
+    scene.renderer.setAnimationLoop((t, frame)=>{
+      drawBG(); step(); drawBall(ball.x, ball.y);
+      const mesh=scene.querySelector('#screen').getObject3D('mesh');
       if (mesh && mesh.material && mesh.material.map) mesh.material.map.needsUpdate = true;
-      if (frame) { pollSwing(frame); handleButtons(); }
+      if (frame){ pollSwing(frame); buttons(); }
     });
 
-    sceneEl.addEventListener('loaded', () => {
+    scene.addEventListener('loaded', ()=>{
       const tex = new THREE.CanvasTexture(cvs);
-      const mesh = sceneEl.querySelector('#screen').getObject3D('mesh');
-      if (mesh) { mesh.material.map = tex; mesh.material.needsUpdate = true; }
+      const mesh = scene.querySelector('#screen').getObject3D('mesh');
+      if (mesh){ mesh.material.map = tex; mesh.material.needsUpdate = true; }
     });
 
-    // ====== Explicit AR/VR buttons ======
+    // ====== UI & session management ======
     const arBtn = document.getElementById('enterAR');
     const vrBtn = document.getElementById('enterVR');
+    const status = document.getElementById('status');
+    document.getElementById('reset').onclick = resetBall;
 
     async function setupXRButtons(){
-      if (!('xr' in navigator)) { vrBtn.style.display = 'none'; arBtn.style.display = 'none'; return; }
+      if (!('xr' in navigator)){ status.textContent = 'WebXR not available'; return; }
       try {
         const arOK = await navigator.xr.isSessionSupported('immersive-ar');
-        if (arOK) arBtn.style.display = 'inline-block';
         const vrOK = await navigator.xr.isSessionSupported('immersive-vr');
-        if (vrOK) vrBtn.style.display = 'inline-block';
-      } catch (e) { /* ignore */ }
+        if (arOK) { arBtn.style.display='inline-block'; status.textContent='AR available'; }
+        else { status.textContent='AR not available; use VR'; }
+        if (vrOK) vrBtn.style.display='inline-block';
+      } catch(e){ status.textContent = 'XR check failed: ' + e.message; }
     }
 
-    arBtn.addEventListener('click', async () => {
-      try {
+    arBtn.onclick = async ()=>{
+      try{
         const session = await navigator.xr.requestSession('immersive-ar', {
           requiredFeatures: ['local-floor'],
-          optionalFeatures: ['bounded-floor', 'hand-tracking']
+          optionalFeatures: ['bounded-floor','hand-tracking']
         });
-        await sceneEl.renderer.xr.setSession(session);
-      } catch (e) {
-        alert('AR not available: ' + e.message);
-      }
-    });
-
-    vrBtn.addEventListener('click', async () => {
-      try {
+        await scene.renderer.xr.setSession(session);
+      }catch(e){ alert('AR not available: ' + e.message); }
+    };
+    vrBtn.onclick = async ()=>{
+      try{
         const session = await navigator.xr.requestSession('immersive-vr', {
           optionalFeatures: ['local-floor','bounded-floor']
         });
-        await sceneEl.renderer.xr.setSession(session);
-      } catch (e) {
-        alert('VR not available: ' + e.message);
-      }
-    });
+        await scene.renderer.xr.setSession(session);
+      }catch(e){ alert('VR not available: ' + e.message); }
+    };
 
     setupXRButtons();
-    </script>
-  </a-scene>
+  </script>
+</a-scene>
 </body>
 </html>
