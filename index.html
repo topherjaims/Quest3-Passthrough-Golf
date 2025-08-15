@@ -1,0 +1,299 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Quest 3 Passthrough Golf – Pure WebXR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { margin: 0; overflow: hidden; }
+    #overlay {
+      position: fixed;
+      left: 12px;
+      top: 12px;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      font: 16px system-ui;
+      background: rgba(0,0,0,0.4);
+      padding: 8px 12px;
+      border-radius: 10px;
+    }
+    #overlay > * { color: #fff; }
+    button { cursor: pointer; padding: 6px 10px; border-radius: 8px; border: none; background: rgba(255,255,255,0.2); color: #fff; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    label { display: flex; align-items: center; gap: 4px; }
+  </style>
+</head>
+<body>
+  <!-- Overlay UI for AR/VR control and status -->
+  <div id="overlay">
+    <span>Hold trigger &amp; swing. Release to hit.</span>
+    <button id="enter-ar" disabled>AR…</button>
+    <button id="enter-vr" disabled>VR…</button>
+    <button id="reset">Reset ball</button>
+    <label><input type="checkbox" id="lefty"> Left-handed</label>
+    <span id="status">Loading…</span>
+  </div>
+
+  <script type="module">
+    // Import Three.js from a CDN. A specific version is used for stability.
+    import * as THREE from 'https://unpkg.com/three@0.161.0/build/three.module.js';
+
+    // 2D canvas used to draw the golf range and ball. This will be used as a
+    // texture for the large plane acting as the simulator screen.
+    const canvas2d = document.createElement('canvas');
+    canvas2d.width = 1280;
+    canvas2d.height = 720;
+    const ctx = canvas2d.getContext('2d');
+
+    // Helper to draw the range background. It draws stripes and yard markers.
+    function drawBackground() {
+      ctx.fillStyle = '#0b2a';
+      ctx.fillRect(0, 0, canvas2d.width, canvas2d.height);
+      ctx.strokeStyle = '#1d5';
+      ctx.lineWidth = 2;
+      for (let y = 640; y > 120; y -= 44) {
+        ctx.beginPath();
+        ctx.moveTo(80, y);
+        ctx.lineTo(canvas2d.width - 80, y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#9f9';
+      ctx.font = '20px system-ui';
+      for (let i = 50; i <= 300; i += 50) {
+        const y = 640 - i * 1.6;
+        if (y > 120) ctx.fillText(i + 'y', 20, y);
+      }
+      ctx.strokeStyle = '#6fa';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(canvas2d.width / 2, 700);
+      ctx.lineTo(canvas2d.width / 2, 120);
+      ctx.stroke();
+    }
+
+    // Draw the ball on the canvas.
+    function drawBall(x, y) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Ball state and physics parameters.
+    let ball = { x: 120, y: 680, vx: 0, vy: 0, flying: false };
+    const pxPerMeterX = 240;
+    const pxPerMeterY = 240;
+    const gravity = 9.81;
+    const dt = 1 / 60;
+
+    function resetBall() {
+      ball = { x: 120, y: 680, vx: 0, vy: 0, flying: false };
+    }
+
+    function launchBall(speedMps, loftDeg = 12, sideDeg = 0) {
+      const loft = loftDeg * Math.PI / 180;
+      const side = sideDeg * Math.PI / 180;
+      const horiz = speedMps * Math.cos(loft);
+      ball.vx = (horiz * Math.cos(side)) * (pxPerMeterX * dt);
+      ball.vy = -(speedMps * Math.sin(loft)) * (pxPerMeterY * dt);
+      ball.flying = true;
+    }
+
+    function stepBall() {
+      if (!ball.flying) return;
+      ball.x += ball.vx;
+      ball.y += ball.vy;
+      ball.vy += (gravity * pxPerMeterY * dt * dt);
+      if (ball.y > 680) {
+        ball.y = 680;
+        ball.flying = false;
+      }
+    }
+
+    // XR / Three.js globals.
+    let renderer = null;
+    let scene = null;
+    let camera = null;
+    let screenMesh = null;
+    let texture = null;
+    let xrSession = null;
+    let xrRefSpace = null;
+    let lastTime = 0;
+    let lastPos = null;
+    let held = false;
+    let peak = 0;
+    let lastYaw = 0;
+    let leftHanded = false;
+
+    // DOM elements.
+    const arBtn = document.getElementById('enter-ar');
+    const vrBtn = document.getElementById('enter-vr');
+    const resetBtn = document.getElementById('reset');
+    const leftyChk = document.getElementById('lefty');
+    const statusSpan = document.getElementById('status');
+
+    leftyChk.addEventListener('change', () => {
+      leftHanded = leftyChk.checked;
+    });
+    resetBtn.addEventListener('click', resetBall);
+
+    // Initialize the Three.js scene and renderer lazily upon entering XR.
+    async function initScene() {
+      if (renderer) return;
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+      renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+      texture = new THREE.CanvasTexture(canvas2d);
+      const geometry = new THREE.PlaneGeometry(5, 2.8125);
+      const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide });
+      screenMesh = new THREE.Mesh(geometry, material);
+      screenMesh.position.set(0, 1.6, -3.5);
+      scene.add(screenMesh);
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    }
+
+    // Helper to update the canvas and texture each frame.
+    function updateCanvas() {
+      drawBackground();
+      stepBall();
+      drawBall(ball.x, ball.y);
+      if (texture) texture.needsUpdate = true;
+    }
+
+    // Choose the active input source (controller) based on handedness.
+    function getActiveInputSource(frame) {
+      if (!xrSession) return null;
+      for (const source of xrSession.inputSources) {
+        if (!source.gripSpace) continue;
+        if (leftHanded && source.handedness === 'left') return source;
+        if (!leftHanded && source.handedness === 'right') return source;
+      }
+      // Fallback: return the first source with gripSpace.
+      return xrSession.inputSources.find(s => s.gripSpace) || null;
+    }
+
+    // Capture controller motion to determine swing speed and yaw.
+    function pollSwing(frame) {
+      if (!xrSession || !xrRefSpace) return;
+      const src = getActiveInputSource(frame);
+      if (!src || !src.gripSpace) return;
+      const pose = frame.getPose(src.gripSpace, xrRefSpace);
+      if (!pose) return;
+      const t = frame.predictedDisplayTime !== undefined ? frame.predictedDisplayTime : performance.now() / 1000;
+      if (lastPos) {
+        const dtSec = Math.max(1 / 120, t - lastTime);
+        const p = pose.transform.position;
+        const dx = p.x - lastPos.x;
+        const dy = p.y - lastPos.y;
+        const dz = p.z - lastPos.z;
+        const mps = Math.hypot(dx, dy, dz) / dtSec;
+        if (held) peak = Math.max(peak, mps);
+        const q = pose.transform.orientation;
+        // Compute yaw from quaternion.
+        const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z)) * 180 / Math.PI;
+        lastYaw = yaw;
+      }
+      lastPos = pose.transform.position;
+      lastTime = t;
+    }
+
+    // Handle trigger press/release to launch the ball based on swing speed and yaw.
+    function handleButtons(frame) {
+      if (!xrSession) return;
+      const src = getActiveInputSource(frame);
+      if (!src || !src.gamepad) return;
+      const trigger = src.gamepad.buttons[0];
+      if (trigger && trigger.pressed && !held) {
+        held = true;
+        peak = 0;
+      }
+      if ((!trigger || !trigger.pressed) && held) {
+        held = false;
+        const speed = Math.min(90, peak * 6 + 10);
+        const side = Math.max(-15, Math.min(15, lastYaw * 0.2));
+        resetBall();
+        launchBall(speed, 12, side);
+      }
+    }
+
+    // The main XR frame loop. Called each time a new frame should be rendered.
+    function onXRFrame(time, frame) {
+      updateCanvas();
+      pollSwing(frame);
+      handleButtons(frame);
+      renderer.render(scene, camera);
+      xrSession.requestAnimationFrame(onXRFrame);
+    }
+
+    // Start or stop an XR session. Mode is 'immersive-ar' or 'immersive-vr'.
+    async function startSession(mode) {
+      if (xrSession) {
+        await xrSession.end();
+        return;
+      }
+      await initScene();
+      try {
+        const options = {
+          requiredFeatures: ['local-floor'],
+          optionalFeatures: ['bounded-floor', 'hand-tracking', 'dom-overlay'],
+          domOverlay: { root: document.getElementById('overlay') }
+        };
+        xrSession = await navigator.xr.requestSession(mode, options);
+        xrSession.addEventListener('end', () => {
+          xrSession = null;
+          statusSpan.textContent = 'Session ended';
+          arBtn.textContent = 'Enter AR';
+          vrBtn.textContent = 'Enter VR';
+        });
+        // Set up the renderer to use the new session.
+        await renderer.xr.setSession(xrSession);
+        xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+        statusSpan.textContent = 'Started ' + mode;
+        if (mode === 'immersive-ar') arBtn.textContent = 'Exit AR';
+        else vrBtn.textContent = 'Exit VR';
+        xrSession.requestAnimationFrame(onXRFrame);
+      } catch (err) {
+        statusSpan.textContent = 'Failed: ' + err.message;
+      }
+    }
+
+    // Check for WebXR support and enable/disable buttons accordingly.
+    async function checkSupport() {
+      if (!navigator.xr) {
+        statusSpan.textContent = 'WebXR not available';
+        return;
+      }
+      const arSupported = await navigator.xr.isSessionSupported('immersive-ar');
+      const vrSupported = await navigator.xr.isSessionSupported('immersive-vr');
+      if (arSupported) {
+        arBtn.disabled = false;
+        arBtn.textContent = 'Enter AR';
+        arBtn.addEventListener('click', () => startSession('immersive-ar'));
+      } else {
+        arBtn.textContent = 'AR not supported';
+      }
+      if (vrSupported) {
+        vrBtn.disabled = false;
+        vrBtn.textContent = 'Enter VR';
+        vrBtn.addEventListener('click', () => startSession('immersive-vr'));
+      } else {
+        vrBtn.textContent = 'VR not supported';
+      }
+      statusSpan.textContent = 'Ready';
+    }
+
+    // Kick off support check when the page loads.
+    window.addEventListener('load', checkSupport);
+  </script>
+</body>
+</html>
