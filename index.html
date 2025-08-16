@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<!--
+  A simple WebXR AR golf demo for Meta Quest 3.
+
+  This page uses Three.js and the ARButton helper to request an immersive-ar
+  session with hit-test capability. When the user first taps the controller
+  trigger, the script places a virtual driving-range screen (a textured
+  plane) at the detected surface and spawns a 2D ball. Subsequent swings
+  (trigger press and release) measure the controller’s peak velocity to
+  determine the ball’s speed and direction across the screen.
+
+  Instructions:
+    1. Host this file on an HTTPS server (e.g. GitHub Pages).
+    2. Open the page in the Quest browser.
+    3. Tap “Enter AR” to start the session.
+    4. Aim the reticle at a surface and pull the trigger once to place
+       the screen and ball.
+    5. Hold the trigger, swing your controller like a golf club, and
+       release to launch the ball. The ball’s distance on the screen
+       depends on your swing speed.
+
+  The code avoids advanced features such as dom-overlay and plane
+  detection; it relies solely on the hit-test feature (supported by
+  Quest browsers) and a simple 2D canvas texture for the range. If AR is
+  unavailable the ARButton will disable itself.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>WebXR AR Golf Demo</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        font-family: system-ui, sans-serif;
+      }
+      #info {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 1;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 8px 12px;
+        border-radius: 8px;
+      }
+      #info button {
+        padding: 4px 8px;
+        margin-left: 8px;
+        border: none;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.2);
+        color: #fff;
+        cursor: pointer;
+      }
+      #info button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module">
+      import * as THREE from 'three';
+      import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+      let camera, scene, renderer;
+      let controller;
+      let reticle;
+      let hitTestSource = null;
+      let hitTestSourceRequested = false;
+
+      // Flags and objects for the golf game
+      let screenPlaced = false;
+      let rangeMesh = null;
+      let ballMesh = null;
+      const rangeWidth = 4;  // Width of the virtual range plane (meters)
+      const rangeHeight = 2.25;  // Height of the plane
+      // Canvas and texture for drawing the range and ball
+      const canvas2d = document.createElement('canvas');
+      canvas2d.width = 1024;
+      canvas2d.height = 576;
+      const ctx2d = canvas2d.getContext('2d');
+      let rangeTexture;
+      // Ball state for 2D motion across the range
+      let ball2D = { x: 100, y: canvas2d.height - 30, vx: 0, vy: 0, flying: false };
+      const pxPerMeterX = canvas2d.width / rangeWidth;
+      const pxPerMeterY = canvas2d.height / rangeHeight;
+      const gravity = 9.81;
+      const dt = 1 / 60;
+
+      // Controller swing measurement
+      let held = false;
+      let peakSpeed = 0;
+      let lastPose = null;
+      let lastTime = 0;
+
+      init();
+
+      function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+        const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 3);
+        light.position.set(0.5, 1, 0.25);
+        scene.add(light);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.xr.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Info overlay
+        const info = document.createElement('div');
+        info.id = 'info';
+        info.innerHTML = 'Aim at a surface and pull trigger to place range.';
+        document.body.appendChild(info);
+
+        // AR button
+        const arButton = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
+        document.body.appendChild(arButton);
+
+        // Controller setup
+        controller = renderer.xr.getController(0);
+        controller.addEventListener('selectstart', onSelectStart);
+        controller.addEventListener('selectend', onSelectEnd);
+        controller.addEventListener('select', onSelectOnce);
+        scene.add(controller);
+
+        // Reticle for hit test
+        reticle = new THREE.Mesh(
+          new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
+          new THREE.MeshBasicMaterial({ color: 0x00ffff })
+        );
+        reticle.matrixAutoUpdate = false;
+        reticle.visible = false;
+        scene.add(reticle);
+
+        window.addEventListener('resize', onWindowResize);
+        renderer.setAnimationLoop(animate);
+      }
+
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      // Draw the range background on the 2D canvas
+      function drawRangeBackground() {
+        ctx2d.fillStyle = '#0b2a';
+        ctx2d.fillRect(0, 0, canvas2d.width, canvas2d.height);
+        ctx2d.strokeStyle = '#1d5';
+        ctx2d.lineWidth = 2;
+        // Horizontal stripes every 40 px
+        for (let y = canvas2d.height - 40; y > 80; y -= 40) {
+          ctx2d.beginPath();
+          ctx2d.moveTo(60, y);
+          ctx2d.lineTo(canvas2d.width - 60, y);
+          ctx2d.stroke();
+        }
+        // Yard markers every 50 yards (approx.)
+        ctx2d.fillStyle = '#9f9';
+        ctx2d.font = '20px system-ui';
+        for (let yards = 50; yards <= 250; yards += 50) {
+          const y = canvas2d.height - (yards / 50) * 40 - 30;
+          ctx2d.fillText(yards + 'y', 20, y);
+        }
+        // Center line
+        ctx2d.strokeStyle = '#6fa';
+        ctx2d.lineWidth = 3;
+        ctx2d.beginPath();
+        ctx2d.moveTo(canvas2d.width / 2, canvas2d.height - 10);
+        ctx2d.lineTo(canvas2d.width / 2, 80);
+        ctx2d.stroke();
+      }
+
+      // Update ball position and draw it
+      function updateBall2D() {
+        if (!ball2D.flying) return;
+        ball2D.x += ball2D.vx;
+        ball2D.y += ball2D.vy;
+        ball2D.vy += gravity * pxPerMeterY * dt * dt;
+        if (ball2D.y > canvas2d.height - 30) {
+          ball2D.y = canvas2d.height - 30;
+          ball2D.flying = false;
+        }
+      }
+
+      function drawBall2D() {
+        ctx2d.fillStyle = '#ffffff';
+        ctx2d.beginPath();
+        ctx2d.arc(ball2D.x, ball2D.y, 6, 0, Math.PI * 2);
+        ctx2d.fill();
+      }
+
+      // Place the driving range and ball at the reticle position
+      function placeRange(matrix) {
+        // Create the texture and mesh only once
+        if (!rangeTexture) {
+          rangeTexture = new THREE.CanvasTexture(canvas2d);
+        }
+        if (!rangeMesh) {
+          const geo = new THREE.PlaneGeometry(rangeWidth, rangeHeight);
+          const mat = new THREE.MeshBasicMaterial({ map: rangeTexture, transparent: true });
+          rangeMesh = new THREE.Mesh(geo, mat);
+          // Position will be set via matrix later
+          scene.add(rangeMesh);
+        }
+        if (!ballMesh) {
+          const ballGeo = new THREE.SphereGeometry(0.05, 16, 16);
+          const ballMat = new THREE.MeshStandardMaterial({ color: 0xffd700 });
+          ballMesh = new THREE.Mesh(ballGeo, ballMat);
+          scene.add(ballMesh);
+        }
+        // Decompose the reticle matrix to position the range
+        const position = new THREE.Vector3();
+        const quaternion = new THREE.Quaternion();
+        const scale = new THREE.Vector3();
+        matrix.decompose(position, quaternion, scale);
+        // Raise the plane a bit so it doesn't intersect the floor
+        position.y += 0.01;
+        rangeMesh.position.copy(position);
+        // Orient the plane to face the camera
+        const camQuat = renderer.xr.getCamera(camera).quaternion.clone();
+        rangeMesh.quaternion.copy(camQuat);
+        rangeMesh.rotateY(Math.PI);
+        rangeMesh.scale.set(1, 1, 1);
+        // Reset the 2D ball state
+        ball2D.x = canvas2d.width / 2;
+        ball2D.y = canvas2d.height - 30;
+        ball2D.flying = false;
+        // Position the 3D ball just in front of the plane
+        ballMesh.position.copy(position);
+        ballMesh.position.z -= 0.05;
+        screenPlaced = true;
+      }
+
+      // Single select event: place the screen and ball on first press
+      function onSelectOnce() {
+        if (!screenPlaced && reticle.visible) {
+          placeRange(reticle.matrix);
+          document.getElementById('info').innerHTML = 'Hold trigger & swing to launch.';
+        }
+      }
+
+      function onSelectStart() {
+        if (!screenPlaced) return;
+        held = true;
+        peakSpeed = 0;
+        lastPose = null;
+      }
+
+      function onSelectEnd() {
+        if (!screenPlaced || !held) return;
+        held = false;
+        // Map peak speed to ball initial velocity (limit to reasonable values)
+        const speed = Math.min(100, peakSpeed * 8 + 5); // metres per second
+        // Launch angle and side offset
+        const loft = 12 * Math.PI / 180;
+        const side = 0;
+        ball2D.vx = speed * Math.cos(loft) * dt * pxPerMeterX;
+        ball2D.vy = -speed * Math.sin(loft) * dt * pxPerMeterY;
+        ball2D.flying = true;
+      }
+
+      function animate(timestamp, frame) {
+        // Hit test logic (reticle updates)
+        if (frame) {
+          const referenceSpace = renderer.xr.getReferenceSpace();
+          const session = renderer.xr.getSession();
+          if (!hitTestSourceRequested) {
+            session.requestReferenceSpace('viewer').then((refSpace) => {
+              session.requestHitTestSource({ space: refSpace }).then((source) => {
+                hitTestSource = source;
+              });
+            });
+            session.addEventListener('end', () => {
+              hitTestSourceRequested = false;
+              hitTestSource = null;
+            });
+            hitTestSourceRequested = true;
+          }
+          if (hitTestSource && !screenPlaced) {
+            const hitTestResults = frame.getHitTestResults(hitTestSource);
+            if (hitTestResults.length > 0) {
+              const hit = hitTestResults[0];
+              reticle.visible = true;
+              reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+            } else {
+              reticle.visible = false;
+            }
+          }
+          // Measure controller speed while held
+          if (held) {
+            const src = session.inputSources[0];
+            if (src && src.gripSpace) {
+              const pose = frame.getPose(src.gripSpace, referenceSpace);
+              if (pose) {
+                const t = frame.predictedDisplayTime !== undefined ? frame.predictedDisplayTime : timestamp / 1000;
+                if (lastPose) {
+                  const dtSec = Math.max(1 / 120, t - lastTime);
+                  const dx = pose.transform.position.x - lastPose.x;
+                  const dy = pose.transform.position.y - lastPose.y;
+                  const dz = pose.transform.position.z - lastPose.z;
+                  const speed = Math.hypot(dx, dy, dz) / dtSec;
+                  if (speed > peakSpeed) peakSpeed = speed;
+                }
+                lastPose = pose.transform.position;
+                lastTime = frame.predictedDisplayTime !== undefined ? frame.predictedDisplayTime : timestamp / 1000;
+              }
+            }
+          }
+        }
+        // Update 2D range and ball
+        drawRangeBackground();
+        updateBall2D();
+        drawBall2D();
+        // Update texture
+        if (rangeTexture) rangeTexture.needsUpdate = true;
+        // Move the 3D ball slightly forward from the range when it’s flying
+        if (screenPlaced && ball2D.flying) {
+          const worldX = (ball2D.x / canvas2d.width - 0.5) * rangeWidth;
+          const worldY = (0.5 - ball2D.y / canvas2d.height) * rangeHeight;
+          ballMesh.position.set(rangeMesh.position.x + worldX, rangeMesh.position.y + worldY, rangeMesh.position.z - 0.05);
+        }
+        renderer.render(scene, camera);
+      }
+    </script>
+  </head>
+  <body>
+  </body>
+</html>
