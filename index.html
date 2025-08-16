@@ -153,7 +153,12 @@
       const geometry = new THREE.PlaneGeometry(5, 2.8125);
       const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide });
       screenMesh = new THREE.Mesh(geometry, material);
-      screenMesh.position.set(0, 1.6, -3.5);
+      // Anchor the simulator screen in the middle of the room. Position it
+      // roughly at eye height and a couple of metres in front of the user.
+      screenMesh.position.set(0, 1.6, -2.5);
+      // Keep the plane upright. The DoubleSide material will show the
+      // texture no matter which way it's facing.
+      screenMesh.rotation.set(0, 0, 0);
       scene.add(screenMesh);
       window.addEventListener('resize', () => {
         camera.aspect = window.innerWidth / window.innerHeight;
@@ -233,17 +238,10 @@
       // Measure controller motion and handle trigger presses.
       pollSwing(frame);
       handleButtons(frame);
-      // Keep the screen anchored in front of the viewer in AR or VR.
-      const xrCam = renderer.xr.getCamera(camera);
-      if (xrCam) {
-        // Copy viewer pose and orient a point 3.5 m forward in the viewing direction.
-        const offset = new THREE.Vector3(0, 0, -3.5).applyQuaternion(xrCam.quaternion);
-        screenMesh.position.copy(xrCam.position).add(offset);
-        screenMesh.quaternion.copy(xrCam.quaternion);
-      }
-      // Render the frame.
+      // Render the frame normally. The simulator screen remains anchored at
+      // its fixed position in the scene.
       renderer.render(scene, camera);
-      // Request the next frame.
+      // Request the next XR frame.
       xrSession.requestAnimationFrame(onXRFrame);
     }
 
@@ -273,6 +271,15 @@
         statusSpan.textContent = 'Started ' + mode;
         if (mode === 'immersive-ar') arBtn.textContent = 'Exit AR';
         else vrBtn.textContent = 'Exit VR';
+        // Anchor the simulator screen at the initial reference position and
+        // orient it to face the user. We copy the camera’s orientation
+        // (with a 180° Y-rotation) so the plane’s front side faces you.
+        const xrCam = renderer.xr.getCamera(camera);
+        if (xrCam) {
+          screenMesh.position.set(0, 1.6, -2.5);
+          screenMesh.quaternion.copy(xrCam.quaternion);
+          screenMesh.rotateY(Math.PI);
+        }
         xrSession.requestAnimationFrame(onXRFrame);
       } catch (err) {
         statusSpan.textContent = 'Failed: ' + err.message;
